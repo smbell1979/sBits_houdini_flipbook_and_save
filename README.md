@@ -1,6 +1,7 @@
 # Houdini Flipbook and Save
 
-`flipbook_and_save.py` captures the current Scene View exactly as displayed,
+`flipbook_and_save.py` provides a small shelf menu that captures the current
+Scene View exactly as displayed,
 encodes the JPEG sequence to H.264 MP4 with FFmpeg, removes the temporary JPEGs,
 and saves a snapshot of the current HIP scene in a `flipbook` folder beside the
 scene.
@@ -15,8 +16,10 @@ It runs immediately and opens no dialogs.
 4. Click the shelf tool while the mouse is over the Scene View you want to
    capture.
 
-The script calls its entry point directly at the bottom because Houdini shelf
-tools do not reliably use `__name__ == "__main__"`.
+Clicking the shelf tool opens a menu with **Flipbook and Save** and
+**Configure…**. The capture action runs without dialogs. The configurator saves
+preferences to `$HOUDINI_USER_PREF_DIR/flipbook_and_save.json`, keeping them
+outside the scene and project storage.
 
 The HIP file must have been saved at least once. Output is created beside it:
 
@@ -36,7 +39,8 @@ if encoding fails.
 
 ## Configuration
 
-Edit the constants at the top of the script:
+Use **Configure…** from the shelf menu for the common settings. Defaults and
+advanced options remain available as constants at the top of the script:
 
 - `RESOLUTION`: `(width, height)`, or `None` for current viewport size.
 - `FRAME_RANGE`: `"playback"`, `"frame"`, or `(start, end)`.
