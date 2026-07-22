@@ -11,6 +11,7 @@ import json
 import shutil
 import subprocess
 import tempfile
+import time
 import traceback
 from datetime import datetime
 from pathlib import Path
@@ -47,6 +48,10 @@ OUTPUT_ZOOM_PERCENT = 100
 # Also send the captured frames to MPlay.
 OPEN_IN_MPLAY = False
 
+# Capture the complete visible viewport layout (including split top/bottom or
+# side-by-side views). False captures only the Scene Viewer's active viewport.
+CAPTURE_ALL_VIEWPORTS = True
+
 # Optional label added to the timestamped output folder and filenames.
 OUTPUT_LABEL = "flipbook"
 
@@ -59,6 +64,14 @@ DELETE_IMAGES_AFTER_MP4 = True
 # lossless for many viewport captures; 20-23 produces smaller review movies.
 MP4_CRF = 18
 MP4_PRESET = "medium"
+
+# Optional backup executable. The ffmpeg found in PATH is always tried first.
+# Example: r"C:\Tools\ffmpeg\bin\ffmpeg.exe"
+FFMPEG_FALLBACK_PATH = ""
+
+# Stop waiting if Houdini creates no new flipbook frame for this many seconds.
+# The wait keeps Houdini's UI responsive and resets whenever a frame appears.
+FLIPBOOK_STALL_TIMEOUT_SECONDS = 300
 
 # Append progress and full errors to flipbook_and_save_debug.log beside the HIP.
 DEBUG_LOGGING = True
@@ -79,16 +92,19 @@ def _preference_values() -> dict:
         "antialias_samples": ANTIALIAS_SAMPLES,
         "output_zoom_percent": OUTPUT_ZOOM_PERCENT,
         "open_in_mplay": OPEN_IN_MPLAY,
+        "capture_all_viewports": CAPTURE_ALL_VIEWPORTS,
         "delete_images_after_mp4": DELETE_IMAGES_AFTER_MP4,
         "mp4_crf": MP4_CRF,
         "mp4_preset": MP4_PRESET,
+        "ffmpeg_fallback_path": FFMPEG_FALLBACK_PATH,
     }
 
 
 def _apply_preferences(values: dict) -> None:
     global RESOLUTION, FRAME_RANGE, FRAME_INCREMENT, IMAGE_FORMAT
     global ANTIALIAS_SAMPLES, OUTPUT_ZOOM_PERCENT, OPEN_IN_MPLAY
-    global DELETE_IMAGES_AFTER_MP4, MP4_CRF, MP4_PRESET
+    global CAPTURE_ALL_VIEWPORTS
+    global DELETE_IMAGES_AFTER_MP4, MP4_CRF, MP4_PRESET, FFMPEG_FALLBACK_PATH
 
     resolution = values.get("resolution", RESOLUTION)
     RESOLUTION = tuple(resolution) if resolution is not None else None
@@ -99,11 +115,17 @@ def _apply_preferences(values: dict) -> None:
     ANTIALIAS_SAMPLES = values.get("antialias_samples", ANTIALIAS_SAMPLES)
     OUTPUT_ZOOM_PERCENT = int(values.get("output_zoom_percent", OUTPUT_ZOOM_PERCENT))
     OPEN_IN_MPLAY = bool(values.get("open_in_mplay", OPEN_IN_MPLAY))
+    CAPTURE_ALL_VIEWPORTS = bool(
+        values.get("capture_all_viewports", CAPTURE_ALL_VIEWPORTS)
+    )
     DELETE_IMAGES_AFTER_MP4 = bool(
         values.get("delete_images_after_mp4", DELETE_IMAGES_AFTER_MP4)
     )
     MP4_CRF = int(values.get("mp4_crf", MP4_CRF))
     MP4_PRESET = str(values.get("mp4_preset", MP4_PRESET))
+    FFMPEG_FALLBACK_PATH = str(
+        values.get("ffmpeg_fallback_path", FFMPEG_FALLBACK_PATH)
+    ).strip()
 
 
 def _load_preferences() -> None:
@@ -154,8 +176,11 @@ def _debug(message: str, severity=None) -> None:
         pass
 
 
-def _scene_viewer() -> hou.SceneViewer:
+def _scene_viewer(preferred=None) -> hou.SceneViewer:
     """Return the scene viewer containing the currently focused viewport."""
+    if preferred is not None:
+        return preferred
+
     pane = hou.ui.paneTabUnderCursor()
     if pane is not None and pane.type() == hou.paneTabType.SceneViewer:
         return pane
@@ -213,60 +238,118 @@ def _temporary_image_dir(stem: str) -> Path:
     return Path(temp_path)
 
 
+def _wait_for_flipbook_frames(temp_dir, stem, image_ext, capture_range):
+    """Wait for Houdini's asynchronous flipbook writer to finish."""
+    start, end = capture_range
+    increment = float(FRAME_INCREMENT)
+    expected = int((float(end) - float(start)) // increment) + 1
+    if expected < 1:
+        raise RuntimeError("The flipbook frame range contains no frames.")
+
+    state = {
+        "count": 0,
+        "last_progress": time.monotonic(),
+        "stalled": False,
+    }
+    pattern = "{}.*.{}".format(stem, image_ext)
+
+    def capture_finished_or_stalled():
+        count = len(list(temp_dir.glob(pattern)))
+        if count != state["count"]:
+            state["count"] = count
+            state["last_progress"] = time.monotonic()
+            _debug("Flipbook frames ready: {} / {}".format(count, expected))
+        if count >= expected:
+            return True
+        if time.monotonic() - state["last_progress"] >= FLIPBOOK_STALL_TIMEOUT_SECONDS:
+            state["stalled"] = True
+            return True
+        return False
+
+    _debug("Waiting for {} flipbook frames".format(expected))
+    hou.ui.waitUntil(capture_finished_or_stalled)
+    if state["stalled"] or state["count"] < expected:
+        raise RuntimeError(
+            "Flipbook capture stalled: found {} of {} expected {} frames in {}. "
+            "Temporary files were retained.".format(
+                state["count"], expected, image_ext, temp_dir
+            )
+        )
+    _debug("All {} flipbook frames are ready".format(expected))
+
+
 def _encode_mp4(image_pattern, mp4_path, start_frame):
-    ffmpeg = shutil.which("ffmpeg")
-    if ffmpeg is None:
-        raise RuntimeError("ffmpeg was not found in Houdini's system PATH.")
+    candidates = []
+    path_ffmpeg = shutil.which("ffmpeg")
+    if path_ffmpeg:
+        candidates.append(("system PATH", path_ffmpeg))
+
+    fallback = FFMPEG_FALLBACK_PATH.strip().strip('"')
+    if fallback and Path(fallback).is_file():
+        fallback_resolved = str(Path(fallback).resolve())
+        if not any(
+            os.path.normcase(executable) == os.path.normcase(fallback_resolved)
+            for _, executable in candidates
+        ):
+            candidates.append(("configured fallback", fallback_resolved))
+
+    if not candidates:
+        details = "ffmpeg was not found in Houdini's system PATH."
+        if fallback:
+            details += " Configured fallback does not exist: {}".format(fallback)
+        else:
+            details += " No fallback executable is configured."
+        raise RuntimeError(details)
 
     ffmpeg_pattern = str(image_pattern).replace("$F4", "%04d")
     fps = "{:.8g}".format(float(hou.fps()))
-    command = [
-        ffmpeg,
-        "-y",
-        "-framerate",
-        fps,
-        "-start_number",
-        str(int(start_frame)),
-        "-i",
-        ffmpeg_pattern,
-        "-c:v",
-        "libx264",
-        "-preset",
-        str(MP4_PRESET),
-        "-crf",
-        str(int(MP4_CRF)),
-        "-vf",
-        "scale=trunc(iw/2)*2:trunc(ih/2)*2",
-        "-pix_fmt",
-        "yuv420p",
-        "-movflags",
-        "+faststart",
-        str(mp4_path),
-    ]
-
-    _debug("Encoding MP4 at {} fps: {}".format(fps, mp4_path))
     creation_flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-    result = subprocess.run(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        creationflags=creation_flags,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(
-            "ffmpeg failed with exit code {}:\n{}".format(
-                result.returncode, result.stdout
+    failures = []
+    result = None
+    used_source = None
+    for source, executable in candidates:
+        command = [
+            executable, "-y", "-framerate", fps,
+            "-start_number", str(int(start_frame)),
+            "-i", ffmpeg_pattern,
+            "-c:v", "libx264", "-preset", str(MP4_PRESET),
+            "-crf", str(int(MP4_CRF)),
+            "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+            "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+            str(mp4_path),
+        ]
+        _debug("Trying ffmpeg from {}: {}".format(source, executable))
+        try:
+            attempt = subprocess.run(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                creationflags=creation_flags,
+            )
+        except OSError as error:
+            failures.append("{} ({}) could not start: {}".format(source, executable, error))
+            continue
+        if attempt.returncode == 0:
+            result = attempt
+            used_source = source
+            break
+        failures.append(
+            "{} ({}) exited {}:\n{}".format(
+                source, executable, attempt.returncode, attempt.stdout
             )
         )
+
+    if result is None:
+        raise RuntimeError("All ffmpeg attempts failed:\n\n{}".format("\n\n".join(failures)))
 
     if DEBUG_LOGGING and result.stdout:
         with _log_path().open("a", encoding="utf-8") as stream:
             stream.write(result.stdout + "\n")
-    _debug("MP4 encoding completed")
+    _debug("MP4 encoding completed using ffmpeg from {}".format(used_source))
 
 
-def run() -> tuple[str, str]:
+def run(scene_viewer=None) -> tuple[str, str]:
     """Run the flipbook and return ``(mp4_or_images, hip_snapshot)``."""
     _debug("Flipbook and Save started")
     _validate_config()
@@ -295,7 +378,7 @@ def run() -> tuple[str, str]:
     hip_snapshot = _snapshot_path(output_dir, stem, original_hip.suffix)
     mp4_path = output_dir / "{}.mp4".format(stem)
 
-    viewer = _scene_viewer()
+    viewer = _scene_viewer(scene_viewer)
     viewport = viewer.curViewport()
     _debug("Using Scene Viewer: {}; viewport: {}".format(viewer.name(), viewport.name()))
     settings = viewer.flipbookSettings().stash()
@@ -307,7 +390,7 @@ def run() -> tuple[str, str]:
     settings.outputZoom(int(OUTPUT_ZOOM_PERCENT))
     settings.useSheetSize(False)
     settings.beautyPassOnly(False)
-    settings.renderAllViewports(False)
+    settings.renderAllViewports(bool(CAPTURE_ALL_VIEWPORTS))
     settings.scopeChannelKeyframesOnly(False)
     settings.appendFramesToCurrent(False)
     settings.leaveFrameAtEnd(False)
@@ -331,6 +414,12 @@ def run() -> tuple[str, str]:
     _debug("Starting flipbook: {}".format(image_pattern))
     viewer.flipbook(viewport, settings, open_dialog=False)
     _debug("Flipbook call completed")
+    _wait_for_flipbook_frames(
+        temp_image_dir,
+        stem,
+        image_ext,
+        capture_range,
+    )
 
     # Saving to another path behaves like Save As, so restore Houdini's in-memory
     # scene name immediately afterward. The snapshot includes current unsaved work.
@@ -360,10 +449,10 @@ def run() -> tuple[str, str]:
     return (str(final_media), str(hip_snapshot))
 
 
-def execute():
+def execute(scene_viewer=None):
     """Shelf-tool entry point that records failures without opening a dialog."""
     try:
-        return run()
+        return run(scene_viewer)
     except Exception as error:
         details = traceback.format_exc()
         try:
@@ -446,6 +535,16 @@ class ConfigDialog(QtWidgets.QDialog):
         self.antialias.setCurrentIndex(max(aa_index, 0))
         form.addRow("Antialiasing", self.antialias)
 
+        self.image_format = QtWidgets.QComboBox()
+        self.image_format.addItem("JPEG (faster, smaller)", "jpg")
+        self.image_format.addItem("PNG (lossless)", "png")
+        format_value = IMAGE_FORMAT.lower().lstrip(".")
+        if format_value == "jpeg":
+            format_value = "jpg"
+        format_index = self.image_format.findData(format_value)
+        self.image_format.setCurrentIndex(max(format_index, 0))
+        form.addRow("Intermediate images", self.image_format)
+
         self.zoom = QtWidgets.QSpinBox()
         self.zoom.setRange(1, 100)
         self.zoom.setSuffix(" %")
@@ -468,9 +567,26 @@ class ConfigDialog(QtWidgets.QDialog):
         self.preset.setCurrentIndex(max(preset_index, presets.index("medium")))
         form.addRow("FFmpeg preset", self.preset)
 
+        ffmpeg_row = QtWidgets.QWidget()
+        ffmpeg_layout = QtWidgets.QHBoxLayout(ffmpeg_row)
+        ffmpeg_layout.setContentsMargins(0, 0, 0, 0)
+        self.ffmpeg_fallback = QtWidgets.QLineEdit(FFMPEG_FALLBACK_PATH)
+        self.ffmpeg_fallback.setPlaceholderText("Optional path to ffmpeg.exe")
+        browse_button = QtWidgets.QPushButton("Browse…")
+        browse_button.clicked.connect(self._browse_ffmpeg)
+        ffmpeg_layout.addWidget(self.ffmpeg_fallback, 1)
+        ffmpeg_layout.addWidget(browse_button)
+        form.addRow("FFmpeg fallback", ffmpeg_row)
+
         self.open_mplay = QtWidgets.QCheckBox("Also send frames to MPlay")
         self.open_mplay.setChecked(bool(OPEN_IN_MPLAY))
         form.addRow(self.open_mplay)
+
+        self.capture_all_viewports = QtWidgets.QCheckBox(
+            "Capture all visible viewports (split layouts)"
+        )
+        self.capture_all_viewports.setChecked(bool(CAPTURE_ALL_VIEWPORTS))
+        form.addRow(self.capture_all_viewports)
 
         self.delete_images = QtWidgets.QCheckBox(
             "Delete temporary JPEGs after successful encoding"
@@ -493,6 +609,18 @@ class ConfigDialog(QtWidgets.QDialog):
         self.start_frame.setEnabled(enabled)
         self.end_frame.setEnabled(enabled)
 
+    def _browse_ffmpeg(self):
+        current = self.ffmpeg_fallback.text().strip()
+        start_dir = str(Path(current).parent) if current else ""
+        filename, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Choose FFmpeg executable",
+            start_dir,
+            "FFmpeg executable (ffmpeg.exe);;Executable files (*.exe);;All files (*)",
+        )
+        if filename:
+            self.ffmpeg_fallback.setText(filename)
+
     def _save(self):
         mode = self.range_mode.currentData()
         frame_range = (
@@ -510,11 +638,14 @@ class ConfigDialog(QtWidgets.QDialog):
                 ),
                 "frame_range": frame_range,
                 "antialias_samples": self.antialias.currentData(),
+                "image_format": self.image_format.currentData(),
                 "output_zoom_percent": self.zoom.value(),
                 "open_in_mplay": self.open_mplay.isChecked(),
+                "capture_all_viewports": self.capture_all_viewports.isChecked(),
                 "delete_images_after_mp4": self.delete_images.isChecked(),
                 "mp4_crf": self.crf.value(),
                 "mp4_preset": self.preset.currentText(),
+                "ffmpeg_fallback_path": self.ffmpeg_fallback.text().strip(),
             }
         )
         try:
@@ -537,11 +668,35 @@ def show_configurator():
 def show_tool_menu():
     """Show the shelf tool's action menu at the mouse cursor."""
     menu = hou.qt.Menu()
-    run_action = menu.addAction("Flipbook and Save")
+    viewers = [
+        pane_tab
+        for pane_tab in hou.ui.currentPaneTabs()
+        if pane_tab.type() == hou.paneTabType.SceneViewer
+    ]
+    viewers.sort(
+        key=lambda viewer: (
+            viewer.qtScreenGeometry().center().y(),
+            viewer.qtScreenGeometry().center().x(),
+        )
+    )
+
+    viewer_actions = {}
+    if len(viewers) <= 1:
+        run_action = menu.addAction("Flipbook and Save")
+        viewer_actions[run_action] = viewers[0] if viewers else None
+    else:
+        run_menu = menu.addMenu("Flipbook and Save")
+        for index, viewer in enumerate(viewers):
+            viewport = viewer.curViewport()
+            label = "Scene Viewer {} — {} ({})".format(
+                index + 1, viewer.name(), viewport.name()
+            )
+            viewer_actions[run_menu.addAction(label)] = viewer
+
     configure_action = menu.addAction("Configure…")
     selected = menu.exec(QtGui.QCursor.pos())
-    if selected == run_action:
-        execute()
+    if selected in viewer_actions:
+        execute(viewer_actions[selected])
     elif selected == configure_action:
         show_configurator()
 
