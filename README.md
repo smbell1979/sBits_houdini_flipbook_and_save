@@ -1,6 +1,6 @@
 # Houdini Flipbook and Save
 
-`flipbook_and_save.py` provides a small shelf menu that captures the current
+`flipbook_and_save.py` provides a small menu that captures the current
 Scene View exactly as displayed,
 encodes the JPEG sequence to H.264 MP4 with FFmpeg, removes the temporary JPEGs,
 and saves a snapshot of the current HIP scene in a `flipbook` folder beside the
@@ -8,26 +8,40 @@ scene.
 The capture runs without prompts; configuration is available as a separate menu
 action.
 
-## Install as a shelf tool
+## Install as a Houdini package
 
-1. In Houdini, create a new shelf tool.
-2. Set the tool's **Script Language** to **Python**.
-3. Paste or load the complete contents of `flipbook_and_save.py` into the
-   **Script** tab. Copy from the local `.py` file rather than rendered chat text.
-4. Click the shelf tool while the mouse is over the Scene View you want to
-   capture.
+1. Close Houdini.
+2. Find your Houdini user preferences folder. On Windows this is normally
+   `Documents/houdini<version>` (for example, `Documents/houdini22.0`).
+3. Copy both folders inside `dist` into that preferences folder:
+   - `packages`
+   - `sBits_houdini_flipbook_and_save`
+4. Start Houdini.
 
-Clicking the shelf tool opens a menu with **Flipbook and Save** and
-**Configure…**. The capture action runs without dialogs. The configurator saves
-preferences to `$HOUDINI_USER_PREF_DIR/flipbook_and_save.json`, keeping them
-outside the scene and project storage.
+The resulting layout should be:
+
+```text
+Documents/houdini22.0/
+├── packages/
+│   └── sBits_houdini_flipbook_and_save.json
+└── sBits_houdini_flipbook_and_save/
+    ├── MainMenuCommon.xml
+    └── scripts/python/flipbook_and_save.py
+```
+
+The package adds a top-level **sBits** menu containing
+**Flipbook and Save...**. Selecting it opens a small menu with
+**Flipbook and Save** and **Configure…**. The capture action runs
+without dialogs. The configurator saves preferences to
+`$HOUDINI_USER_PREF_DIR/flipbook_and_save.json`, keeping them outside the scene
+and project storage.
 
 When the desktop contains multiple visible Scene Viewer panes—for example, a
 pane layout split into separate Scene Viewers—the **Flipbook and Save** item
 becomes a submenu listing every visible viewer in screen order, along with its
 pane and viewport names. Choose the specific Scene Viewer to capture. This is distinct
-from multiple viewports inside one Scene Viewer, which are controlled by
-**Capture all visible viewports**.
+from multiple viewports inside one Scene Viewer: the tool always captures only
+the selected viewport for reliable, frame-complete output.
 
 The HIP file must have been saved at least once. Output is created beside it:
 
@@ -76,15 +90,15 @@ Temporary JPEGs are deleted only after a successful encode. If every FFmpeg
 attempt fails, the JPEG sequence remains in `$HOUDINI_TEMP_DIR` and the debug
 log records the executable, exit code, and FFmpeg output for each attempt.
 
-Houdini may return from its flipbook API before the image writer has finished.
-The tool therefore waits for the complete expected frame count before launching
-FFmpeg while keeping Houdini's UI responsive. If no new frame appears for
-`FLIPBOOK_STALL_TIMEOUT_SECONDS` (300 seconds by default), the run stops with a
-clear error and retains the temporary folder for inspection.
+Houdini's flipbook call is blocking: it returns after the capture has finished.
+The tool then validates every expected numbered frame before launching FFmpeg.
+If Houdini omits any frames, encoding stops, the exact missing frame numbers are
+reported, and the temporary sequence is retained for diagnosis. Missing frames
+are never silently replaced with duplicated images.
 
 ## Configuration
 
-Use **Configure…** from the shelf menu for the common settings. Defaults and
+Use **Configure…** from the tool menu for the common settings. Defaults and
 advanced options remain available as constants at the top of the script:
 
 The **Intermediate images** setting offers JPEG for faster, smaller temporary
@@ -98,9 +112,6 @@ output and follow the same cleanup and failure-recovery behavior.
 - `ANTIALIAS_SAMPLES`: `1`, `2`, `4`, or `8`; `None` uses the viewport setting.
 - `OUTPUT_ZOOM_PERCENT`: output scaling from 1 to 100 percent.
 - `OPEN_IN_MPLAY`: whether to also send frames to MPlay.
-- `CAPTURE_ALL_VIEWPORTS`: capture the complete visible viewport layout. Keep
-  this enabled for multiple viewports within one Scene Viewer. Separate Scene
-  Viewer panes are selected from the shelf menu instead.
 - `OUTPUT_LABEL`: label used in the output folder and filenames.
 - `CREATE_MP4`: encode an H.264 movie using `ffmpeg` from the system `PATH`.
 - `DELETE_IMAGES_AFTER_MP4`: remove source images after a successful encode.
@@ -108,8 +119,6 @@ output and follow the same cleanup and failure-recovery behavior.
 - `MP4_PRESET`: encoding speed/compression tradeoff (`"medium"` default).
 - `FFMPEG_FALLBACK_PATH`: optional explicit path to `ffmpeg.exe`. The executable
   from `PATH` is tried first; the fallback is tried if it cannot encode.
-- `FLIPBOOK_STALL_TIMEOUT_SECONDS`: seconds without a newly written frame before
-  treating the asynchronous viewport capture as stalled.
 - `DEBUG_LOGGING`: writes progress and errors to a persistent text log.
 
 JPEG is the default intermediate format for faster viewport capture. Houdini
@@ -125,6 +134,13 @@ Temporary frames are retained if FFmpeg fails.
   dialog settings are not changed.
 - The HIP snapshot includes current unsaved changes. Houdini remains pointed at
   the original HIP filename after the snapshot is written.
+
+## Uninstall
+
+Close Houdini, then remove these two items from the Houdini preferences folder:
+
+- `packages/sBits_houdini_flipbook_and_save.json`
+- `sBits_houdini_flipbook_and_save`
 
 ## Debugging
 

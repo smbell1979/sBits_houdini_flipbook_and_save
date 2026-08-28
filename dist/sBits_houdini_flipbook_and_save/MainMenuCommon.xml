@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mainMenu>
+  <menuBar>
+    <subMenu id="sbits_menu">
+      <modifyItem>
+        <insertBefore>help_menu</insertBefore>
+      </modifyItem>
+      <label>sBits</label>
+
+      <scriptItem id="h.sbits_flipbook_and_save">
+        <label>Flipbook and Save...</label>
+        <scriptCode><![CDATA[
+import flipbook_and_save
+flipbook_and_save.show_tool_menu()
+        ]]></scriptCode>
+      </scriptItem>
+    </subMenu>
+  </menuBar>
+</mainMenu>
