@@ -119,7 +119,8 @@ output and follow the same cleanup and failure-recovery behavior.
 - `MP4_PRESET`: encoding speed/compression tradeoff (`"medium"` default).
 - `FFMPEG_FALLBACK_PATH`: optional explicit path to `ffmpeg.exe`. The executable
   from `PATH` is tried first; the fallback is tried if it cannot encode.
-- `DEBUG_LOGGING`: writes progress and errors to a persistent text log.
+- `DEBUG_LOGGING`: writes progress and errors to a persistent text log inside
+  the `flipbook` output folder. Logging is disabled by default.
 
 JPEG is the default intermediate format for faster viewport capture. Houdini
 controls JPEG compression through its image-output preferences. FFmpeg uses the
@@ -144,10 +145,11 @@ Close Houdini, then remove these two items from the Houdini preferences folder:
 
 ## Debugging
 
-Progress appears in Houdini's status bar. A persistent log named
-`flipbook_and_save_debug.log` is appended beside the current HIP file. If the
-HIP has never been saved, the log is written to the operating system's temporary
-folder instead. The log includes the full Python traceback for any failure.
+Progress appears in Houdini's status bar. When `DEBUG_LOGGING` is enabled, a
+persistent `flipbook/flipbook_and_save_debug.log` is appended beside the current
+HIP file. If the HIP has never been saved, the log is written to the operating
+system's temporary folder instead. The log includes the full Python traceback
+for any failure.
 
 For the quickest test, temporarily use:
 

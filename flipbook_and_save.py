@@ -65,8 +65,9 @@ MP4_PRESET = "medium"
 # Example: r"C:\Tools\ffmpeg\bin\ffmpeg.exe"
 FFMPEG_FALLBACK_PATH = ""
 
-# Append progress and full errors to flipbook_and_save_debug.log beside the HIP.
-DEBUG_LOGGING = True
+# Append progress and full errors to flipbook/flipbook_and_save_debug.log beside
+# the HIP. Disabled by default; set to True when troubleshooting.
+DEBUG_LOGGING = False
 
 
 def _preferences_path() -> Path:
@@ -141,7 +142,7 @@ def _log_path() -> Path:
     try:
         hip_parent = Path(hou.hipFile.path()).parent
         if hip_parent.is_dir():
-            return hip_parent / "flipbook_and_save_debug.log"
+            return hip_parent / "flipbook" / "flipbook_and_save_debug.log"
     except Exception:
         pass
     return Path(tempfile.gettempdir()) / "flipbook_and_save_debug.log"
@@ -152,7 +153,9 @@ def _debug(message: str, severity=None) -> None:
     line = "[{}] {}".format(timestamp, message)
     print(line)
     if DEBUG_LOGGING:
-        with _log_path().open("a", encoding="utf-8") as stream:
+        log_path = _log_path()
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a", encoding="utf-8") as stream:
             stream.write(line + "\n")
     try:
         hou.ui.setStatusMessage(
